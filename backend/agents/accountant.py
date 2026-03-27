@@ -1,51 +1,82 @@
+import anthropic
 import json
+import os
 import re
 import base64
-from google import genai
-from google.genai import types
 
-def run_accountant(image_b64, image_mime):
-    client = genai.Client()
+class AccountantAgent:
+    def __init__(self):
+        self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        self.model = "claude-opus-4-5"
 
-    ACCOUNTANT_PROMPT = """
-You are a receipt scanning assistant. Analyze this receipt image carefully.
-Extract ALL of the following and return ONLY a valid JSON object, no prose, no markdown.
+    def detect_media_type(self, image_base64: str) -> str:
+        raw = base64.b64decode(image_base64[:16])
+        if raw[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        elif raw[:3] == b'\xff\xd8\xff':
+            return "image/jpeg"
+        elif raw[:4] == b'GIF8':
+            return "image/gif"
+        else:
+            return "image/jpeg"
 
+    def run(self, image_base64: str) -> dict:
+        try:
+            media_type = self.detect_media_type(image_base64)
+            prompt = """You are a receipt scanning agent. Carefully examine this receipt image and extract ALL information.
+
+Return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
 {
-  "items": [
-    {"name": "Item name", "qty": 1, "unit_price": 0.00, "line_total": 0.00}
+  "line_items": [
+    {"name": "Item Name", "price": 0.00}
   ],
   "subtotal": 0.00,
   "tax": 0.00,
   "tip": 0.00,
   "total": 0.00,
-  "error": null
+  "item_count": 0
 }
 
-All dollar amounts must be floats. If you cannot read the receipt, set error to a short description. Return ONLY the JSON.
+Rules:
+- Extract every line item with its exact price
+- If tip is not on receipt, set tip to 0.00
+- If tax is not shown separately, estimate from total - subtotal
+- total should equal subtotal + tax + tip
+- All prices must be numbers (not strings)
 """
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_base64,
+                                },
+                            },
+                            {"type": "text", "text": prompt}
+                        ],
+                    }
+                ],
+            )
 
-    try:
-        image_bytes = base64.b64decode(image_b64)
-        print(f"DEBUG: image_mime={image_mime}, image_bytes_len={len(image_bytes)}")
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[
-                types.Content(parts=[
-                    types.Part(text=ACCOUNTANT_PROMPT),
-                    types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=image_bytes))
-                ])
-            ]
-        )
-        print(f"DEBUG: Gemini response: {response.text[:300]}")
-        raw_text = response.text.strip()
-        raw_text = re.sub(r"```json\s*", "", raw_text)
-        raw_text = re.sub(r"```\s*", "", raw_text).strip()
-        return json.loads(raw_text)
-    except json.JSONDecodeError as e:
-        print(f"DEBUG: JSON error: {e}, raw_text: {raw_text[:200]}")
-        return {"error": "Could not read receipt. Please try a clearer photo."}
-    except Exception as e:
-        print(f"DEBUG: Exception: {str(e)}")
-        return {"error": f"Accountant agent failed: {str(e)}"}
+            raw = message.content[0].text.strip()
+            raw = re.sub(r"```json|```", "", raw).strip()
+            result = json.loads(raw)
+            result.setdefault("line_items", [])
+            result.setdefault("subtotal", 0.0)
+            result.setdefault("tax", 0.0)
+            result.setdefault("tip", 0.0)
+            result.setdefault("total", result["subtotal"] + result["tax"] + result["tip"])
+            result.setdefault("item_count", len(result["line_items"]))
+            return result
 
+        except json.JSONDecodeError as e:
+            return {"error": f"Could not parse receipt data: {str(e)}"}
+        except Exception as e:
+            return {"error": str(e)}

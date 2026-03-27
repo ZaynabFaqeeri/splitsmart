@@ -1,16 +1,22 @@
-def run_collector(splits, paypal_username):
-    payment_links = {}
+class CollectorAgent:
+    DEFAULT_PAYPAL_USER = "splitsmart"
 
-    for person, data in splits.items():
-        total = round(data.get("total", 0.0), 2)
-        link = f"https://paypal.me/{paypal_username}/{total:.2f}"
-        payment_links[person] = {
-            "subtotal": data.get("subtotal", 0.0),
-            "tax": data.get("tax", 0.0),
-            "tip": data.get("tip", 0.0),
-            "total": total,
-            "items": data.get("items", []),
-            "paypal_link": link,
-        }
+    def run(self, splits: list, paypal_username: str = "") -> dict:
+        username = paypal_username.strip() if paypal_username.strip() else self.DEFAULT_PAYPAL_USER
 
-    return {"payment_links": payment_links}
+        if username.startswith("@"):
+            username = username[1:]
+
+        payments = []
+        for split in splits:
+            amount = split["amount"]
+            name = split["name"]
+            link = f"https://paypal.me/{username}/{amount:.2f}"
+            payments.append({
+                "name": name,
+                "amount": amount,
+                "link": link,
+                "items": split.get("items", [])
+            })
+
+        return {"payments": payments, "paypal_username": username}
